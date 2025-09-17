@@ -69,8 +69,10 @@ def refresh_cookie():
 
 refresh_cookie()
 index = 1
+MAX_FAIL_RETRY = 3 # 失败重试次数
 lastTime = int(time.time()) - 30
 logging.info(f"⏱️ 一共需要阅读 {READ_NUM} 次...")
+
 
 while index <= READ_NUM:
     data.pop('s')
@@ -90,18 +92,56 @@ while index <= READ_NUM:
     resData = response.json()
     logging.info(f"📕 response: {resData}")
 
-    if 'succ' in resData:
-        if 'synckey' in resData:
-            lastTime = thisTime
-            index += 1
-            time.sleep(30)
-            logging.info(f"✅ 阅读成功，阅读进度：{(index - 1) * 0.5} 分钟")
-        else:
-            logging.warning("❌ 无synckey, 尝试修复...")
-            fix_no_synckey()
+    # ---- 新的失败重试逻辑开始 ----
+    if 'succ' not in resData:
+        logging.warning("❌ 未返回 succ，进入重试阶段…")
+        retry = 0
+        while retry < MAX_FAIL_RETRY:
+            retry += 1
+            logging.info(f"🔁 重试 #{retry}：refresh_cookie -> POST")
+            try:
+                refresh_cookie()
+            except Exception:
+                # refresh_cookie 内部已 push + 打日志；这里直接判定失败终止脚本
+                logging.error("❌ refresh_cookie 抛异常，终止脚本。")
+                raise
+
+            # 重发请求（无需改动 data 的签名时间戳也可以继续用；如需更严谨可重算一次 ts/rn/sg/s）
+            response = requests.post(READ_URL, headers=headers, cookies=cookies,
+                                     data=json.dumps(data, separators=(',', ':')))
+            try:
+                resData = response.json()
+            except Exception:
+                resData = {}
+
+            logging.info(f"📕 retry response: {resData}")
+
+            # 重试退出条件
+            if 'succ' in resData:
+                logging.info("✅ 重试成功，出现 succ，退出重试阶段。")
+                break
+
+            # 仍未成功：等待 2 秒再下一次重试
+            logging.info(f"⏳ 2s 后继续重试…")
+            time.sleep(2)
+
+        # 超过 MAX_FAIL_RETRY 次仍无 succ => 计为失败并终止脚本
+        if 'succ' not in resData:
+            err = f"❌ 本次阅读在重试 {MAX_FAIL_RETRY} 次后仍未返回 succ，计为失败并终止。"
+            logging.error(err)
+            push(err, PUSH_METHOD)
+            break
+    # ---- 新的失败重试逻辑结束 ----
+
+    # 有 succ 的正常分支
+    if 'synckey' in resData:
+        lastTime = thisTime
+        index += 1
+        logging.info(f"✅ 阅读成功，阅读进度：{(index - 1) * 0.5} 分钟")
+        time.sleep(30)
     else:
-        logging.warning("❌ cookie 已过期，尝试刷新...")
-        refresh_cookie()
+        logging.warning("❌ 返回 succ 但无 synckey，尝试修复…")
+        fix_no_synckey()
 
 logging.info("🎉 阅读脚本已完成！")
 
